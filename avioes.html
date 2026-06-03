@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>✈️ Aviões Acima de Mim</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+      background: #000;
+      color: #0ff;
+      overflow: hidden;
+    }
+    #map {
+      height: 100vh;
+      width: 100vw;
+    }
+    .info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px 15px;
+      border-radius: 8px;
+      z-index: 1000;
+      font-size: 14px;
+    }
+    .plane {
+      font-size: 20px;
+      filter: drop-shadow(0 0 8px #0ff);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="info">
+    <strong>✈️ Aviões próximos a você</strong><br>
+    <span id="status">Obtendo localização...</span>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    let map, userMarker;
+    let planesLayer = L.layerGroup().addTo(map); // será criado depois
+
+    // Inicializa o mapa
+    function initMap(lat, lon) {
+      map = L.map('map', { zoomControl: false }).setView([lat, lon], 13);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+
+      // Marcador da sua posição
+      userMarker = L.circleMarker([lat, lon], {
+        color: '#0ff',
+        radius: 8,
+        fillOpacity: 0.8
+      }).addTo(map).bindPopup("Você está aqui");
+
+      planesLayer = L.layerGroup().addTo(map);
+      updatePlanes(lat, lon);
+      setInterval(() => updatePlanes(lat, lon), 10000); // atualiza a cada 10s
+    }
+
+    // Busca aviões usando OpenSky Network (API gratuita)
+    async function updatePlanes(userLat, userLon) {
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = "Buscando aviões...";
+
+      try {
+        // Bounding box de ~50km ao redor do usuário
+        const latDelta = 0.4;
+        const lonDelta = 0.4;
+
+        const url = `https://opensky-network.org/api/states/all?lamin=${userLat-latDelta}&lomin=${userLon-lonDelta}&lamax=${userLat+latDelta}&lomax=${userLon+lonDelta}`;
+
+        const res = await fetch(url);
+        const data = await res.json();
+
+        planesLayer.clearLayers();
+
+        if (!data.states || data.states.length === 0) {
+          statusEl.textContent = "Nenhum avião próximo no momento";
+          return;
+        }
+
+        statusEl.textContent = `${data.states.length} aviões encontrados`;
+
+        data.states.forEach(plane => {
+          const [icao, callsign, origin, longitude, latitude, baro_altitude, velocity, heading] = plane;
+
+          if (!latitude || !longitude) return;
+
+          const alt = baro_altitude ? Math.round(baro_altitude / 0.3048) + " ft" : "—";
+          const speed = velocity ? Math.round(velocity * 1.94384) + " kt" : "—"; // m/s → knots
+
+          const planeIcon = L.divIcon({
+            className: 'plane',
+            html: '✈️',
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+          });
+
+          const marker = L.marker([latitude, longitude], { icon: planeIcon })
+            .addTo(planesLayer)
+            .bindPopup(`
+              <b>${callsign ? callsign.trim() : icao}</b><br>
+              Altitude: ${alt}<br>
+              Velocidade: ${speed}<br>
+              Direção: ${heading ? heading.toFixed(0) + '°' : '—'}
+            `);
+
+          // Rotaciona o avião conforme a direção
+          marker._icon.style.transformOrigin = 'center';
+          marker._icon.style.transform = `rotate(${heading || 0}deg)`;
+        });
+
+      } catch (err) {
+        statusEl.textContent = "Erro ao buscar dados (tente novamente)";
+        console.error(err);
+      }
+    }
+
+    // Pega localização do usuário
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        position => {
+          const lat = position.coords.latitude;
+          const lon = position.coords.longitude;
+          document.getElementById('status').textContent = `Localização obtida! (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+          initMap(lat, lon);
+        },
+        () => {
+          document.getElementById('status').innerHTML = `Não foi possível obter sua localização.<br>Use um lugar com boa cobertura.`;
+        }
+      );
+    } else {
+      document.getElementById('status').textContent = "Geolocalização não suportada no seu navegador.";
+    }
+  </script>
+</body>
+</html>
