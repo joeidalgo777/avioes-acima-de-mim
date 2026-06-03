@@ -7,85 +7,104 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { margin:0; padding:0; background:#000; color:#0ff; font-family:Arial; overflow:hidden; }
+    body { 
+      margin:0; padding:0; background:#000; color:#0ff; 
+      font-family: Arial, sans-serif; overflow:hidden; 
+    }
     #map { height:100vh; width:100vw; }
     .info {
-      position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.75);
-      padding: 12px 18px; border-radius: 10px; z-index: 1000; font-size: 15px;
-      border: 1px solid #0ff;
+      position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.9);
+      padding: 15px 20px; border-radius: 10px; z-index: 1000; 
+      border: 1px solid #0ff; max-width: 350px;
     }
-    .plane { font-size: 28px; text-shadow: 0 0 10px #0ff; }
+    .error { color: #ff6666; }
+    .success { color: #0f0; }
   </style>
 </head>
 <body>
 
   <div class="info">
-    <strong>✈️ Aviões próximos a você</strong><br>
-    <span id="status">Obtendo sua localização...</span>
+    <strong>✈️ Aviões Acima de Mim</strong><br><br>
+    <span id="status">Localização obtida! Buscando aviões...</span>
   </div>
 
   <div id="map"></div>
 
   <script>
-    let map, planesLayer;
+    const statusEl = document.getElementById('status');
 
-    function initMap(lat, lon) {
-      map = L.map('map', { zoomControl: true }).setView([lat, lon], 14);
-      
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-
-      L.circleMarker([lat, lon], { color: '#0ff', radius: 10, fillOpacity: 0.6 })
-       .addTo(map).bindPopup("Você está aqui");
-
-      planesLayer = L.layerGroup().addTo(map);
-      updatePlanes(lat, lon);
-      setInterval(() => updatePlanes(lat, lon), 8000);
-    }
-
-    async function updatePlanes(userLat, userLon) {
-      const status = document.getElementById('status');
+    async function updatePlanes(map, userLat, userLon) {
       try {
-        const res = await fetch(`https://opensky-network.org/api/states/all?lamin=${userLat-0.5}&lomin=${userLon-0.5}&lamax=${userLat+0.5}&lomax=${userLon+0.5}`);
+        // Usando uma API alternativa mais amigável com CORS (ADS-B Exchange)
+        const res = await fetch(`https://adsbexchange.com/api/aircraft/?lat=${userLat}&lon=${userLon}&dist=80`);
+        
+        if (!res.ok) throw new Error("API indisponível");
+        
         const data = await res.json();
 
-        planesLayer.clearLayers();
+        // Limpa aviões antigos
+        map.eachLayer(layer => {
+          if (layer.options && layer.options.icon) layer.remove();
+        });
 
-        if (!data.states || data.states.length === 0) {
-          status.textContent = "Nenhum avião próximo no momento";
-          return;
+        let count = 0;
+
+        if (data.ac && data.ac.length > 0) {
+          data.ac.forEach(plane => {
+            if (!plane.lat || !plane.lon) return;
+            
+            count++;
+            const marker = L.marker([plane.lat, plane.lon], {
+              icon: L.divIcon({ 
+                className: 'plane', 
+                html: '✈️', 
+                iconSize: [32, 32] 
+              })
+            }).addTo(map);
+
+            marker.bindPopup(`
+              <b>${plane.call || plane.icao || 'Desconhecido'}</b><br>
+              Altitude: ${plane.alt_b ? Math.round(plane.alt_b) + ' ft' : '?'}<br>
+              Velocidade: ${plane.gs ? Math.round(plane.gs) + ' kt' : '?'}
+            `);
+          });
         }
 
-        status.textContent = `${data.states.length} aviões próximos`;
+        statusEl.innerHTML = `<span class="success">✅ ${count} aviões encontrados nas proximidades</span>`;
 
-        data.states.forEach(plane => {
-          const [icao, callsign, , lon, lat, alt, vel, heading] = plane;
-          if (!lat || !lon) return;
-
-          const marker = L.marker([lat, lon], {
-            icon: L.divIcon({ className: 'plane', html: '✈️', iconSize: [30,30] })
-          }).addTo(planesLayer);
-
-          marker.bindPopup(`<b>${callsign || icao}</b><br>Alt: ${alt ? Math.round(alt/0.3048)+"ft" : "?"}`);
-          if (heading) marker._icon.style.transform = `rotate(${heading}deg)`;
-        });
-      } catch(e) {
-        status.textContent = "Erro ao buscar aviões";
+      } catch (e) {
+        console.error(e);
+        statusEl.innerHTML = `<span class="error">❌ Erro ao buscar aviões<br><small>Tente recarregar a página</small></span>`;
       }
     }
 
-    // === Pedir localização ===
+    function initMap(lat, lon) {
+      const map = L.map('map', { zoomControl: true }).setView([lat, lon], 13);
+      
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: ''
+      }).addTo(map);
+
+      // Marcador do usuário
+      L.circleMarker([lat, lon], { color: '#0ff', radius: 12, fillOpacity: 0.7 })
+       .addTo(map)
+       .bindPopup("<b>Você está aqui</b>");
+
+      // Primeira busca
+      updatePlanes(map, lat, lon);
+      
+      // Atualiza a cada 12 segundos
+      setInterval(() => updatePlanes(map, lat, lon), 12000);
+    }
+
+    // Pega localização
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
-        pos => {
-          initMap(pos.coords.latitude, pos.coords.longitude);
-        },
+        pos => initMap(pos.coords.latitude, pos.coords.longitude),
         err => {
-          document.getElementById('status').innerHTML = 
-            `Erro ao obter localização.<br><small>${err.message}</small>`;
+          statusEl.innerHTML = `<span class="error">Erro na localização (${err.code})</span>`;
         }
       );
-    } else {
-      document.getElementById('status').textContent = "Seu navegador não suporta geolocalização.";
     }
   </script>
 </body>
