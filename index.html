@@ -1,110 +1,231 @@
 <!DOCTYPE html>
-<html lang="pt">
+<html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>✈️ Aviões Acima de Mim</title>
+  <title>✈️ Radar de Aviões</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { 
-      margin:0; padding:0; background:#000; color:#0ff; 
-      font-family: Arial, sans-serif; overflow:hidden; 
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #f5f5f5; color: #333; }
+
+    #header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px;
+      background: #fff;
+      border-bottom: 1px solid #e0e0e0;
+      flex-wrap: wrap;
     }
-    #map { height:100vh; width:100vw; }
-    .info {
-      position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.9);
-      padding: 15px 20px; border-radius: 10px; z-index: 1000; 
-      border: 1px solid #0ff; max-width: 350px;
+    #header h1 { font-size: 15px; font-weight: 600; }
+    #count-badge {
+      font-size: 12px; background: #dbeafe; color: #1d4ed8;
+      padding: 3px 10px; border-radius: 999px; display: none;
     }
-    .error { color: #ff6666; }
-    .success { color: #0f0; }
+    #source-badge {
+      font-size: 11px; color: #888;
+      padding: 3px 8px; border-radius: 999px;
+      border: 1px solid #e0e0e0; display: none;
+    }
+    #status { font-size: 13px; color: #666; margin-left: auto; }
+    #refresh-btn {
+      font-size: 12px; padding: 5px 12px; cursor: pointer;
+      border: 1px solid #ccc; border-radius: 6px;
+      background: #fff; display: none; align-items: center; gap: 5px;
+    }
+    #refresh-btn:hover { background: #f0f0f0; }
+
+    #map { height: calc(100vh - 120px); width: 100%; }
+
+    #plane-list {
+      padding: 8px 16px;
+      font-size: 13px; color: #555;
+      background: #fff;
+      border-top: 1px solid #e0e0e0;
+      min-height: 34px; line-height: 1.8;
+      overflow: hidden;
+    }
   </style>
 </head>
 <body>
 
-  <div class="info">
-    <strong>✈️ Aviões Acima de Mim</strong><br><br>
-    <span id="status">Localização obtida! Buscando aviões...</span>
+  <div id="header">
+    <h1>✈️ Radar de Aviões</h1>
+    <span id="count-badge"></span>
+    <span id="source-badge"></span>
+    <span id="status">Obtendo localização...</span>
+    <button id="refresh-btn" onclick="manualRefresh()">↻ Atualizar</button>
   </div>
 
   <div id="map"></div>
+  <div id="plane-list">Aguardando dados...</div>
 
   <script>
-    const statusEl = document.getElementById('status');
+    const statusEl    = document.getElementById('status');
+    const countBadge  = document.getElementById('count-badge');
+    const sourceBadge = document.getElementById('source-badge');
+    const planeList   = document.getElementById('plane-list');
+    const refreshBtn  = document.getElementById('refresh-btn');
 
-    async function updatePlanes(map, userLat, userLon) {
-      try {
-        // Usando uma API alternativa mais amigável com CORS (ADS-B Exchange)
-        const res = await fetch(`https://adsbexchange.com/api/aircraft/?lat=${userLat}&lon=${userLon}&dist=80`);
-        
-        if (!res.ok) throw new Error("API indisponível");
-        
-        const data = await res.json();
+    let map, planeMarkers = [], userLat, userLon;
+    let lastSource = '';
 
-        // Limpa aviões antigos
-        map.eachLayer(layer => {
-          if (layer.options && layer.options.icon) layer.remove();
-        });
+    const APIS = [
+      { name: 'adsb.lol', url: (lat, lon, d) => `https://api.adsb.lol/v2/lat/${lat}/lon/${lon}/dist/${d}` },
+      { name: 'adsb.one', url: (lat, lon, d) => `https://api.adsb.one/v2/lat/${lat}/lon/${lon}/dist/${d}` },
+    ];
 
-        let count = 0;
+    function planeIcon(heading) {
+      return L.divIcon({
+        className: '',
+        html: `<div style="font-size:20px;transform:rotate(${heading || 0}deg);line-height:1;">✈️</div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+    }
 
-        if (data.ac && data.ac.length > 0) {
-          data.ac.forEach(plane => {
-            if (!plane.lat || !plane.lon) return;
-            
-            count++;
-            const marker = L.marker([plane.lat, plane.lon], {
-              icon: L.divIcon({ 
-                className: 'plane', 
-                html: '✈️', 
-                iconSize: [32, 32] 
-              })
-            }).addTo(map);
+    const userIcon = L.divIcon({
+      className: '',
+      html: `<div style="width:12px;height:12px;border-radius:50%;background:#3b82f6;border:2px solid white;box-shadow:0 0 0 4px rgba(59,130,246,0.25)"></div>`,
+      iconSize: [12, 12],
+      iconAnchor: [6, 6]
+    });
 
-            marker.bindPopup(`
-              <b>${plane.call || plane.icao || 'Desconhecido'}</b><br>
-              Altitude: ${plane.alt_b ? Math.round(plane.alt_b) + ' ft' : '?'}<br>
-              Velocidade: ${plane.gs ? Math.round(plane.gs) + ' kt' : '?'}
-            `);
-          });
+    function mToFt(m)  { return m != null ? Math.round(m * 3.281) : null; }
+    function msToKt(v) { return v != null ? Math.round(v * 1.944) : null; }
+
+    async function fetchFromApi(api, lat, lon, dist) {
+      const res = await fetch(api.url(lat, lon, dist), { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return data.ac || [];
+    }
+
+    async function fetchPlanes(lat, lon) {
+      for (const api of APIS) {
+        try {
+          const planes = await fetchFromApi(api, lat, lon, 150);
+          lastSource = api.name;
+          return planes;
+        } catch (e) {
+          console.warn(`${api.name} falhou:`, e.message);
         }
+      }
+      throw new Error('Todas as fontes falharam');
+    }
 
-        statusEl.innerHTML = `<span class="success">✅ ${count} aviões encontrados nas proximidades</span>`;
+    function renderPlanes(planes) {
+      planeMarkers.forEach(m => map.removeLayer(m));
+      planeMarkers = [];
 
+      const valid = planes.filter(p => p.lat != null && p.lon != null);
+
+      valid.forEach(p => {
+        const callsign = (p.flight || p.r || p.hex || '???').trim();
+        const altFt    = mToFt(p.alt_geom ?? p.alt_baro);
+        const spd      = p.gs != null ? Math.round(p.gs) : null;
+        const hdg      = p.track ?? p.true_heading ?? 0;
+        const origin   = p.orig_iata || p.dep || '';
+        const dest     = p.dest_iata || p.arr || '';
+        const route    = (origin && dest) ? `${origin} → ${dest}` : (origin || dest || '');
+        const aircraft = p.t || '';
+
+        const m = L.marker([p.lat, p.lon], { icon: planeIcon(hdg) })
+          .addTo(map)
+          .bindPopup(`
+            <b style="font-size:14px">${callsign}</b><br>
+            ${aircraft ? `Aeronave: <b>${aircraft}</b><br>` : ''}
+            ${route     ? `Rota: ${route}<br>` : ''}
+            Altitude: ${altFt != null ? altFt + ' ft' : '?'}<br>
+            Velocidade: ${spd  != null ? spd  + ' kt' : '?'}<br>
+            Rumo: ${hdg ? Math.round(hdg) + '°' : '?'}
+          `);
+        planeMarkers.push(m);
+      });
+
+      countBadge.style.display  = 'inline';
+      sourceBadge.style.display = 'inline';
+      countBadge.textContent    = `${valid.length} aviões`;
+      sourceBadge.textContent   = `via ${lastSource}`;
+      refreshBtn.style.display  = 'inline-flex';
+
+      const now = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      statusEl.textContent = `Atualizado ${now}`;
+
+      if (!valid.length) {
+        planeList.textContent = 'Nenhum avião detectado no raio de 150 km no momento.';
+        return;
+      }
+
+      const sorted = [...valid].sort((a, b) =>
+        (b.alt_geom ?? b.alt_baro ?? 0) - (a.alt_geom ?? a.alt_baro ?? 0)
+      );
+
+      planeList.innerHTML =
+        sorted.slice(0, 7).map(p => {
+          const cs  = (p.flight || p.r || p.hex || '???').trim();
+          const alt = mToFt(p.alt_geom ?? p.alt_baro);
+          const spd = p.gs != null ? Math.round(p.gs) : null;
+          const ac  = p.t ? ` · ${p.t}` : '';
+          return `<span style="margin-right:16px;white-space:nowrap">✈️ <b>${cs}</b>` +
+                 `<span style="color:#999">${ac}${alt != null ? ' · ' + alt + ' ft' : ''}${spd != null ? ' · ' + spd + ' kt' : ''}</span></span>`;
+        }).join('') +
+        (valid.length > 7 ? `<span style="color:#aaa"> +${valid.length - 7} mais</span>` : '');
+    }
+
+    async function updateMap() {
+      if (!userLat) return;
+      try {
+        statusEl.textContent = 'Buscando...';
+        const planes = await fetchPlanes(userLat, userLon);
+        renderPlanes(planes);
       } catch (e) {
-        console.error(e);
-        statusEl.innerHTML = `<span class="error">❌ Erro ao buscar aviões<br><small>Tente recarregar a página</small></span>`;
+        statusEl.textContent = 'Erro ao buscar dados';
+        planeList.innerHTML = '⚠️ Todas as fontes indisponíveis no momento. Clique em Atualizar para tentar novamente.';
+        refreshBtn.style.display = 'inline-flex';
       }
     }
 
+    function manualRefresh() { updateMap(); }
+
     function initMap(lat, lon) {
-      const map = L.map('map', { zoomControl: true }).setView([lat, lon], 13);
-      
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: ''
+      userLat = lat;
+      userLon = lon;
+
+      map = L.map('map').setView([lat, lon], 8);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+
+      L.marker([lat, lon], { icon: userIcon })
+        .addTo(map)
+        .bindPopup('<b>Você está aqui</b>');
+
+      L.circle([lat, lon], {
+        radius: 150000,
+        color: '#3b82f6',
+        fillColor: '#3b82f6',
+        fillOpacity: 0.03,
+        weight: 1,
+        dashArray: '4 4'
       }).addTo(map);
 
-      // Marcador do usuário
-      L.circleMarker([lat, lon], { color: '#0ff', radius: 12, fillOpacity: 0.7 })
-       .addTo(map)
-       .bindPopup("<b>Você está aqui</b>");
-
-      // Primeira busca
-      updatePlanes(map, lat, lon);
-      
-      // Atualiza a cada 12 segundos
-      setInterval(() => updatePlanes(map, lat, lon), 12000);
+      updateMap();
+      setInterval(updateMap, 20000);
     }
 
-    // Pega localização
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
-        pos => initMap(pos.coords.latitude, pos.coords.longitude),
-        err => {
-          statusEl.innerHTML = `<span class="error">Erro na localização (${err.code})</span>`;
-        }
+        pos => {
+          statusEl.textContent = 'Localização obtida!';
+          initMap(pos.coords.latitude, pos.coords.longitude);
+        },
+        () => {
+          statusEl.textContent = 'Localização padrão (Mogi das Cruzes)';
+          initMap(-23.526, -46.19);
+        },
+        { timeout: 8000 }
       );
+    } else {
+      initMap(-23.526, -46.19);
     }
   </script>
 </body>
